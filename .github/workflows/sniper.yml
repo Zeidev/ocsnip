@@ -53,6 +53,7 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}   # Telegram Bot（免费无限）
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}             # 企业微信群机器人（免费无限）
+      WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}               # WxPusher 极简推送（免费无限，进微信）
 
     steps:
       - name: Preflight 检查 Secrets
@@ -166,6 +167,13 @@ jobs:
                 '{msgtype:"text",text:{content:($t+"\n"+$b)}}' \
                 | curl -s -m 20 -X POST "$WECOM_WEBHOOK" \
                     -H 'Content-Type: application/json' -d @- >/dev/null || true
+            fi
+            # 通道 4：WxPusher 极简推送 SPT（免费无限，微信 ClawBot 直达）
+            if [ -n "${WXPUSHER_SPT:-}" ]; then
+              curl -s -m 20 -X POST "https://wxpusher.zjiecode.com/api/send/message" \
+                -H 'Content-Type: application/json' \
+                -d "$(jq -nc --arg t "$title" --arg b "$body" --arg s "$WXPUSHER_SPT" \
+                      '{appToken:$s,content:($t+"\n\n"+$b),contentType:1}')" >/dev/null || true
             fi
           }
 
