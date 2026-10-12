@@ -1,0 +1,224 @@
+name: Oracle ARM Sniper
+
+# ─────────────────────────────────────────────────────────────
+# 跑在公开仓库：Actions 分钟数不计费，可 24 小时不间断
+# 每 5 小时触发一次，单次最长跑 4 小时 50 分（GitHub 单 job 上限 6h）
+# 上一轮没结束时新的一轮会排队，不会互相踩
+# ─────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_notify:
+        description: '只测微信推送，不抢机（填 1 测，填 0 正常抢）'
+        required: false
+        default: '0'
+      shape_config:
+        description: 'Shape 配置 JSON'
+        required: false
+        default: '{"ocpus":2,"memoryInGBs":12}'
+      boot_volume_gb:
+        description: '引导卷 GB（Always Free 总块存储 200GB）'
+        required: false
+        default: '100'
+      duration_min:
+        description: '单次运行上限（分钟）'
+        required: false
+        default: '290'
+  schedule:
+    - cron: '0 */5 * * *'
+
+concurrency:
+  group: oci-arm-sniper
+  cancel-in-progress: false
+
+jobs:
+  sniper:
+    name: ARM Instance Sniper
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      OCI_TENANCY: ${{ secrets.TENANCY_OCID }}
+      OCI_USER: ${{ secrets.USER_OCID }}
+      OCI_FP: ${{ secrets.FINGERPRINT }}
+      OCI_REGION: ${{ secrets.REGION }}
+      OCI_PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+      SUBNET_ID: ${{ secrets.SUBNET_ID }}
+      SSH_PUB_KEY: ${{ secrets.SSH_PUB_KEY }}
+      SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+
+    steps:
+      - name: Preflight 检查 Secrets
+        run: |
+          set -u
+          missing=""
+          for v in OCI_TENANCY OCI_USER OCI_FP OCI_REGION OCI_PRIVATE_KEY SUBNET_ID SSH_PUB_KEY; do
+            eval "val=\${$v:-}"
+            [ -z "$val" ] && missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::缺少 Secrets:$missing"
+            echo "### ❌ 缺少 Secrets:$missing" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "✅ Secrets 齐全" >> "$GITHUB_STEP_SUMMARY"
+          [ -z "${SERVERCHAN_SENDKEY:-}" ] && echo "⚠️ 未配置 SERVERCHAN_SENDKEY，抢到后不会推微信" >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: 微信推送自检
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_notify == '1' }}
+        run: |
+          [ -z "${SERVERCHAN_SENDKEY:-}" ] && { echo "::error::SERVERCHAN_SENDKEY 未配置"; exit 1; }
+          curl -s -m 20 -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
+            --data-urlencode "title=✅ 甲骨文抢机 · 微信通道已打通" \
+            --data-urlencode "desp=这是一条自检消息。抢机脚本抢到实例时会推到这里。"
+          echo "自检消息已发送，请查看微信。" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 安装 OCI CLI
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notify == '1') }}
+        run: |
+          curl -sL -o install.sh https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh
+          chmod +x install.sh
+          ./install.sh --accept-all-defaults
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -qq && sudo apt-get install -y -qq jq >/dev/null
+
+      - name: 写入 OCI 配置并鉴权
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notify == '1') }}
+        run: |
+          export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
+          mkdir -p ~/.oci
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${OCI_USER}
+          fingerprint=${OCI_FP}
+          tenancy=${OCI_TENANCY}
+          region=${OCI_REGION}
+          key_file=/home/runner/.oci/key.pem
+          EOF
+          printf '%s\n' "${OCI_PRIVATE_KEY}" > ~/.oci/key.pem
+          chmod 700 ~/.oci
+          chmod 600 ~/.oci/key.pem ~/.oci/config
+          ~/bin/oci iam region list --query 'data[0].name' --raw-output && echo "✅ OCI 鉴权通过"
+
+      - name: 抢机主循环
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notify == '1') }}
+        env:
+          SHAPE_CONFIG: ${{ inputs.shape_config || '{"ocpus":2,"memoryInGBs":12}' }}
+          BOOT_GB: ${{ inputs.boot_volume_gb || '100' }}
+          DURATION_MIN: ${{ inputs.duration_min || '290' }}
+        run: |
+          set -u
+          export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
+          export PATH="$HOME/bin:$PATH"
+
+          notify() {
+            [ -z "${SERVERCHAN_SENDKEY:-}" ] && return 0
+            curl -s -m 20 -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
+              --data-urlencode "title=$1" --data-urlencode "desp=$2" >/dev/null || true
+          }
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "${SSH_PUB_KEY}" > ~/.ssh/oracle_arm.pub
+          chmod 600 ~/.ssh/oracle_arm.pub
+
+          AD_LIST=$(oci iam availability-domain list --compartment-id "$OCI_TENANCY" \
+            --query 'data[*].name' --raw-output | jq -r '.[]' | sort)
+          echo "[AD] 目标可用区: $(echo $AD_LIST | tr '\n' ' ')"
+          echo "**可用区**：$(echo $AD_LIST | tr '\n' ' ')" >> "$GITHUB_STEP_SUMMARY"
+
+          IMAGE_ID=$(oci compute image list --compartment-id "$OCI_TENANCY" \
+            --operating-system "Canonical Ubuntu" --operating-system-version "24.04" \
+            --shape "VM.Standard.A1.Flex" --sort-by TIMECREATED --sort-order DESC \
+            --query 'data[0].id' --raw-output)
+          if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ]; then
+            echo "::error::拿不到 Ubuntu 24.04 ARM 镜像 ID"
+            notify "❌ 甲骨文抢机：镜像查询失败" "拿不到 VM.Standard.A1.Flex 的 Ubuntu 24.04 镜像，请检查 REGION 是否正确。"
+            exit 1
+          fi
+          echo "[IMG] $IMAGE_ID"
+
+          CANDIDATES="$SHAPE_CONFIG"
+          case "$SHAPE_CONFIG" in
+            *'"ocpus":4'*) CANDIDATES="$SHAPE_CONFIG '{"ocpus":2,"memoryInGBs":12}' '{"ocpus":1,"memoryInGBs":6}'" ;;
+            *'"ocpus":2'*) CANDIDATES="$SHAPE_CONFIG '{"ocpus":1,"memoryInGBs":6}'" ;;
+          esac
+          echo "[CFG] 尝试顺序: $CANDIDATES"
+
+          START=$(date +%s)
+          LIMIT=$(( DURATION_MIN * 60 ))
+          ROUND=0
+
+          while true; do
+            NOW=$(date +%s); ELAPSED=$(( NOW - START ))
+            if [ "$ELAPSED" -gt "$LIMIT" ]; then
+              echo "[TIMEOUT] 已跑满 ${DURATION_MIN} 分钟，安全退出。"
+              echo "⏱ 本轮未抢到，已安全退出（已跑 ${ELAPSED}s）。" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            ROUND=$(( ROUND + 1 ))
+            for cfg in $CANDIDATES; do
+              for ad in $AD_LIST; do
+                echo "[R${ROUND}][TRY] $ad | $cfg | ${ELAPSED}s"
+                OUT=$(oci compute instance launch \
+                  --availability-domain "$ad" \
+                  --compartment-id "$OCI_TENANCY" \
+                  --shape "VM.Standard.A1.Flex" \
+                  --shape-config "$cfg" \
+                  --image-id "$IMAGE_ID" \
+                  --subnet-id "$SUBNET_ID" \
+                  --ssh-authorized-keys-file ~/.ssh/oracle_arm.pub \
+                  --assign-public-ip true \
+                  --boot-volume-size-in-gbs "$BOOT_GB" \
+                  --display-name "SNIPER-$(date +%m%d_%H%M)" \
+                  --wait-for-state RUNNING --max-wait-seconds 1 2>&1) && RC=0 || RC=$?
+                if [ "$RC" -eq 0 ]; then
+                  IID=$(echo "$OUT" | jq -r '.data.id')
+                  IP=$(oci compute instance list-vnics --instance-id "$IID" \
+                        --query 'data[0]."public-ip"' --raw-output 2>/dev/null)
+                  echo "=============================================="
+                  echo "[SUCCESS] 抢到了！"
+                  echo "实例 OCID : $IID"
+                  echo "公网 IP   : $IP"
+                  echo "可用区    : $ad"
+                  echo "规格      : $cfg"
+                  echo "=============================================="
+                  {
+                    echo "## 🎉 抢到甲骨文 ARM 实例"
+                    echo ""
+                    echo "| 项 | 值 |"
+                    echo "|---|---|"
+                    echo "| 实例 OCID | \`$IID\` |"
+                    echo "| 公网 IP | \`$IP\` |"
+                    echo "| 可用区 | \`$ad\` |"
+                    echo "| 规格 | \`$cfg\` |"
+                    echo "| 引导卷 | ${BOOT_GB} GB |"
+                    echo "| 登录用户 | \`ubuntu\` |"
+                    echo ""
+                    echo "SSH：\`ssh -i <你的私钥> ubuntu@$IP\`"
+                  } >> "$GITHUB_STEP_SUMMARY"
+                  notify "🎉 甲骨文 ARM 抢机成功！" "**实例 OCID**：\`$IID\`  \n\n**公网 IP**：\`$IP\`  \n\n**可用区**：\`$ad\`  \n\n**规格**：\`$cfg\`  \n\n**引导卷**：${BOOT_GB} GB  \n\n登录：\`ssh -i <私钥> ubuntu@$IP\`"
+                  echo "$IID" > instance-ocid.txt
+                  exit 0
+                fi
+                if echo "$OUT" | grep -qiE 'quota|LimitExceeded|not eligible|CannotParseRequest'; then
+                  echo "  ↳ 配额不足/不可用，跳过该配置：$cfg"
+                  continue 2
+                fi
+                if echo "$OUT" | grep -qiE 'Out of host capacity|OutOfHostCapacity|capacity'; then
+                  echo "  ↳ $ad 无库存"
+                else
+                  echo "  ↳ 其他错误：$(echo "$OUT" | tail -3 | tr '\n' ' ' | cut -c1-240)"
+                fi
+                sleep 3
+              done
+            done
+            sleep 30
+          done
+
+      - name: 保存实例信息
+        if: ${{ hashFiles('instance-ocid.txt') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: instance-ocid
+          path: instance-ocid.txt
+          retention-days: 90
