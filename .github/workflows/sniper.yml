@@ -1,9 +1,12 @@
 name: Oracle ARM Sniper
 
 # ─────────────────────────────────────────────────────────────
-# 跑在公开仓库：Actions 分钟数不计费，可 24 小时不间断
-# 每 5 小时触发一次，单次最长跑 4 小时 50 分（GitHub 单 job 上限 6h）
+# 跑在公开仓库：Actions 分钟数不计费，可 7×24 不间断
+# 每 5 小时触发一次，单次最长跑 290 分钟（GitHub 单 job 上限 6h）
 # 上一轮没结束时新的一轮会排队，不会互相踩
+#
+# 抢到后不只是开机 —— 通过 cloud-init 一次性把「保活 + 探针 + 环境」
+# 全部装好，实例出生即是完成态，规避官方 7 天闲置回收规则。
 # ─────────────────────────────────────────────────────────────
 
 on:
@@ -100,6 +103,18 @@ jobs:
           chmod 600 ~/.oci/key.pem ~/.oci/config
           ~/bin/oci iam region list --query 'data[0].name' --raw-output && echo "✅ OCI 鉴权通过"
 
+      - name: 取回 cloud-init（实例出生即完成态）
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notify == '1') }}
+        run: |
+          mkdir -p ~/.ssh
+          curl -sL -o ~/.ssh/cloud-init.yaml \
+            https://raw.githubusercontent.com/chengchengbeigu-source/ocisniper/main/.github/cloud-init.yaml
+          head -1 ~/.ssh/cloud-init.yaml | grep -q '^#cloud-config' \
+            || { echo "::error::cloud-init 下载失败"; exit 1; }
+          printf '%s\n' "${SSH_PUB_KEY}" > ~/.ssh/oracle_arm.pub
+          chmod 600 ~/.ssh/oracle_arm.pub ~/.ssh/cloud-init.yaml
+          echo "cloud-init 已就绪，$(wc -l < ~/.ssh/cloud-init.yaml) 行"
+
       - name: 抢机主循环
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notify == '1') }}
         env:
@@ -116,10 +131,6 @@ jobs:
             curl -s -m 20 -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
               --data-urlencode "title=$1" --data-urlencode "desp=$2" >/dev/null || true
           }
-
-          mkdir -p ~/.ssh
-          printf '%s\n' "${SSH_PUB_KEY}" > ~/.ssh/oracle_arm.pub
-          chmod 600 ~/.ssh/oracle_arm.pub
 
           AD_LIST=$(oci iam availability-domain list --compartment-id "$OCI_TENANCY" \
             --query 'data[*].name' --raw-output | jq -r '.[]' | sort)
@@ -167,6 +178,7 @@ jobs:
                   --image-id "$IMAGE_ID" \
                   --subnet-id "$SUBNET_ID" \
                   --ssh-authorized-keys-file ~/.ssh/oracle_arm.pub \
+                  --user-data-file ~/.ssh/cloud-init.yaml \
                   --assign-public-ip true \
                   --boot-volume-size-in-gbs "$BOOT_GB" \
                   --display-name "SNIPER-$(date +%m%d_%H%M)" \
@@ -193,10 +205,11 @@ jobs:
                     echo "| 规格 | \`$cfg\` |"
                     echo "| 引导卷 | ${BOOT_GB} GB |"
                     echo "| 登录用户 | \`ubuntu\` |"
+                    echo "| 保活 | cloud-init 已自动装上并启动 |"
                     echo ""
                     echo "SSH：\`ssh -i <你的私钥> ubuntu@$IP\`"
                   } >> "$GITHUB_STEP_SUMMARY"
-                  notify "🎉 甲骨文 ARM 抢机成功！" "**实例 OCID**：\`$IID\`  \n\n**公网 IP**：\`$IP\`  \n\n**可用区**：\`$ad\`  \n\n**规格**：\`$cfg\`  \n\n**引导卷**：${BOOT_GB} GB  \n\n登录：\`ssh -i <私钥> ubuntu@$IP\`"
+                  notify "🎉 甲骨文 ARM 抢机成功！" "**实例 OCID**：\`$IID\`  \n\n**公网 IP**：\`$IP\`  \n\n**可用区**：\`$ad\`  \n\n**规格**：\`$cfg\`  \n\n**引导卷**：${BOOT_GB} GB  \n\n保活与网络心跳已由 cloud-init 自动装好，登录即可用。  \n\n登录：\`ssh -i <私钥> ubuntu@$IP\`"
                   echo "$IID" > instance-ocid.txt
                   exit 0
                 fi
