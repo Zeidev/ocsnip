@@ -1,0 +1,92 @@
+#cloud-config
+# ─────────────────────────────────────────────────────────────
+# ocisniper 实例初始化脚本（实例出生即完成态）
+# 目的：规避甲骨文官方「7 天闲置回收」规则，并把环境一次装好
+#   CPU 95 分位 ≥ 20%  → oci-keepalive（stress-ng 常驻 65% 负载）
+#   内存 95 分位 ≥ 20% → oci-keepalive 同时吃 40% 内存
+#   网络 95 分位 ≥ 20% → oci-netbeat（每小时 25MB 下载）
+# 任意一项不达标就不构成「闲置」，实例不会被回收。
+# ─────────────────────────────────────────────────────────────
+package_update: true
+package_upgrade: false
+packages:
+  - stress-ng
+  - jq
+  - curl
+  - htop
+  - net-tools
+
+swap:
+  filename: /swapfile
+  size: 2G
+  maxsize: 2G
+
+write_files:
+  - path: /usr/local/bin/oci-keepalive.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # CPU + 内存双指标常驻负载，防止官方闲置回收
+      exec stress-ng --cpu 1 --cpu-load 65 --vm 1 --vm-bytes 40% --vm-keep --timeout 0
+
+  - path: /etc/systemd/system/oci-keepalive.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=OCI Always Free anti-reclaim keepalive
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=/usr/local/bin/oci-keepalive.sh
+      Restart=always
+      RestartSec=5
+      Nice=10
+      CPUSchedulingPolicy=batch
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/bin/oci-netbeat.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # 每小时拉 25MB，把网络 95 分位顶起来（网络指标双保险）
+      while true; do
+        curl -s -m 120 -o /dev/null https://speed.cloudflare.com/__down?bytes=25000000 || true
+        sleep 3600
+      done
+
+  - path: /etc/systemd/system/oci-netbeat.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=OCI anti-reclaim network heartbeat
+      After=network-online.target
+
+      [Service]
+      ExecStart=/usr/local/bin/oci-netbeat.sh
+      Restart=always
+      RestartSec=10
+      Nice=15
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/motd
+    permissions: '0644'
+    content: |
+      ==================================================
+        这台机器由 ocisniper 自动抢下并完成初始化
+          · 保活服务：systemctl status oci-keepalive
+          · 网络心跳：systemctl status oci-netbeat
+          · 别停上面两个服务，否则 7 天内会被甲骨文回收
+      ==================================================
+
+runcmd:
+  - systemctl daemon-reload
+  - systemctl enable --now oci-keepalive.service
+  - systemctl enable --now oci-netbeat.service
+  - echo "ocisniper cloud-init done at $(date -Is)" > /var/log/ocisniper-init.log
+
+final_message: "ocisniper: 实例初始化完成（保活已启动）"
