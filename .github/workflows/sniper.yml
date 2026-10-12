@@ -48,7 +48,11 @@ jobs:
       OCI_PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
       SUBNET_ID: ${{ secrets.SUBNET_ID }}
       SSH_PUB_KEY: ${{ secrets.SSH_PUB_KEY }}
-      SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+      # ── 推送通道：三个都是可选的，配哪个就走哪个，全配就全推 ──
+      SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}   # Server酱（免费版 5 条/天）
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}   # Telegram Bot（免费无限）
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}             # 企业微信群机器人（免费无限）
 
     steps:
       - name: Preflight 检查 Secrets
@@ -67,14 +71,30 @@ jobs:
           echo "✅ Secrets 齐全" >> "$GITHUB_STEP_SUMMARY"
           [ -z "${SERVERCHAN_SENDKEY:-}" ] && echo "⚠️ 未配置 SERVERCHAN_SENDKEY，抢到后不会推微信" >> "$GITHUB_STEP_SUMMARY" || true
 
-      - name: 微信推送自检
+      - name: 推送自检
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_notify == '1' }}
         run: |
-          [ -z "${SERVERCHAN_SENDKEY:-}" ] && { echo "::error::SERVERCHAN_SENDKEY 未配置"; exit 1; }
-          curl -s -m 20 -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
-            --data-urlencode "title=✅ 甲骨文抢机 · 微信通道已打通" \
-            --data-urlencode "desp=这是一条自检消息。抢机脚本抢到实例时会推到这里。"
-          echo "自检消息已发送，请查看微信。" >> "$GITHUB_STEP_SUMMARY"
+          set -u
+          ok=0
+          if [ -n "${SERVERCHAN_SENDKEY:-}" ]; then
+            curl -s -m 20 -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
+              --data-urlencode "title=✅ 甲骨文抢机 · Server酱通道已打通" \
+              --data-urlencode "desp=这是一条自检消息。" && ok=1
+          fi
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            curl -s -m 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=✅ 甲骨文抢机 · Telegram 通道已打通" && ok=1
+          fi
+          if [ -n "${WECOM_WEBHOOK:-}" ]; then
+            jq -n '{msgtype:"text",text:{content:"✅ 甲骨文抢机 · 企业微信通道已打通"}}' \
+              | curl -s -m 20 -X POST "$WECOM_WEBHOOK" -H 'Content-Type: application/json' -d @- && ok=1
+          fi
+          if [ "$ok" -eq 0 ]; then
+            echo "::error::三个推送通道都没配，请至少配一个"
+            exit 1
+          fi
+          echo "自检消息已发送，请查看手机。" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 安装 OCI CLI
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notify == '1') }}
@@ -127,9 +147,26 @@ jobs:
           export PATH="$HOME/bin:$PATH"
 
           notify() {
-            [ -z "${SERVERCHAN_SENDKEY:-}" ] && return 0
-            curl -s -m 20 -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
-              --data-urlencode "title=$1" --data-urlencode "desp=$2" >/dev/null || true
+            local title="$1" body="$2"
+            # 通道 1：Server酱 → 个人微信（免费版 5 条/天）
+            if [ -n "${SERVERCHAN_SENDKEY:-}" ]; then
+              curl -s -m 20 -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
+                --data-urlencode "title=$title" --data-urlencode "desp=$body" >/dev/null || true
+            fi
+            # 通道 2：Telegram Bot（免费无限量）
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              TG_TEXT=$(printf '%s\n%s' "$title" "$body")
+              curl -s -m 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+                --data-urlencode "text=${TG_TEXT}" >/dev/null || true
+            fi
+            # 通道 3：企业微信群机器人（免费无限量）
+            if [ -n "${WECOM_WEBHOOK:-}" ]; then
+              jq -n --arg t "$title" --arg b "$body" \
+                '{msgtype:"text",text:{content:($t+"\n"+$b)}}' \
+                | curl -s -m 20 -X POST "$WECOM_WEBHOOK" \
+                    -H 'Content-Type: application/json' -d @- >/dev/null || true
+            fi
           }
 
           AD_LIST=$(oci iam availability-domain list --compartment-id "$OCI_TENANCY" \
