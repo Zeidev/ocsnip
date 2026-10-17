@@ -28,8 +28,10 @@ on:
         description: '单次运行上限（分钟）'
         required: false
         default: '290'
-  schedule:
-    - cron: '0 */5 * * *'
+  # ⏸ 定时触发已暂停（2026-10-17）：缺 TENANCY_OCID / USER_OCID / SUBNET_ID 三个 Secret，
+  #    每 5 小时的空转只会刷红。补齐后把下面两行注释放开即可恢复：
+  # schedule:
+  #   - cron: '0 */5 * * *'
 
 concurrency:
   group: oci-arm-sniper
