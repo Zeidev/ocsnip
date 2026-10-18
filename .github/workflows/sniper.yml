@@ -1,35 +1,37 @@
 name: Oracle ARM Sniper
 
 # ─────────────────────────────────────────────────────────────
-# 跑在公开仓库：Actions 分钟数不计费，可 7×24 不间断
-# 每 5 小时触发一次，单次最长跑 290 分钟（GitHub 单 job 上限 6h）
-# 上一轮没结束时新的一轮会排队，不会互相踩
+# Genel depoda çalışır: Actions dakikaları sayılmaz, 7×24 kesintisiz
+# Her 5 saatte bir tetiklenir, tek çalıştırma en fazla 290 dakika (GitHub job sınırı 6s)
+# Önceki tur bitmeden yeni tur kuyruğa alınır, birbirine karışmaz
 #
-# 抢到后不只是开机 —— 通过 cloud-init 一次性把「保活 + 探针 + 环境」
-# 全部装好，实例出生即是完成态，规避官方 7 天闲置回收规则。
+# Yakalamak sadece makineyi açmak değil — cloud-init tek seferde
+# "keepalive + prob + ortam" kurulumunu yapar, makine doğuştan tamamlanmış gelir:
+# resmî 7 gün boşta kalma kuralı böylece atlanır.
 # ─────────────────────────────────────────────────────────────
 
 on:
   workflow_dispatch:
     inputs:
       test_notify:
-        description: '只测微信推送，不抢机（填 1 测，填 0 正常抢）'
+        description: 'Sadece push kanalını test et, makine yakalama (1 = test, 0 = normal)'
         required: false
         default: '0'
       shape_config:
-        description: 'Shape 配置 JSON'
+        description: 'Shape ayarı JSON'
         required: false
         default: '{"ocpus":2,"memoryInGBs":12}'
       boot_volume_gb:
-        description: '引导卷 GB（Always Free 总块存储 200GB）'
+        description: 'Boot volume GB (Always Free toplam blok depolama 200GB)'
         required: false
         default: '100'
       duration_min:
-        description: '单次运行上限（分钟）'
+        description: 'Tek çalıştırma üst sınırı (dakika)'
         required: false
         default: '290'
-  # ⏸ 定时触发已暂停（2026-10-17）：缺 TENANCY_OCID / USER_OCID / SUBNET_ID 三个 Secret，
-  #    每 5 小时的空转只会刷红。补齐后把下面两行注释放开即可恢复：
+  # ⏸ Zamanlanmış tetikleme duraklatıldı (2026-10-17): TENANCY_OCID / USER_OCID / SUBNET_ID
+  #    Secret'ları eksik; 5 saatte bir boşa dönmek sadece kırmızı işaret üretir.
+  #    Tamamladıktan sonra aşağıdaki iki satırın yorumunu kaldırarak geri al:
   # schedule:
   #   - cron: '0 */5 * * *'
 
@@ -50,15 +52,15 @@ jobs:
       OCI_PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
       SUBNET_ID: ${{ secrets.SUBNET_ID }}
       SSH_PUB_KEY: ${{ secrets.SSH_PUB_KEY }}
-      # ── 推送通道：三个都是可选的，配哪个就走哪个，全配就全推 ──
-      SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}   # Server酱（免费版 5 条/天）
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}   # Telegram Bot（免费无限）
+      # ── Push kanalları: hepsi opsiyonel, hangisi tanımlıysa o çalışır ──
+      SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}   # Server酱 (ücretsiz plan: 5/gün)
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}   # Telegram Bot (ücretsiz, sınırsız)
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}             # 企业微信群机器人（免费无限）
-      WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}               # WxPusher 极简推送（免费无限，进微信）
+      WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}             # WeCom grup botu (ücretsiz, sınırsız)
+      WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}               # WxPusher (ücretsiz, sınırsız, WeChat'e gider)
 
     steps:
-      - name: Preflight 检查 Secrets
+      - name: Preflight - Secret kontrolü
         run: |
           set -u
           missing=""
@@ -67,44 +69,44 @@ jobs:
             [ -z "$val" ] && missing="$missing $v"
           done
           if [ -n "$missing" ]; then
-            echo "::error::缺少 Secrets:$missing"
-            echo "### ❌ 缺少 Secrets:$missing" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Eksik Secret'lar:$missing"
+            echo "### ❌ Eksik Secret'lar:$missing" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          echo "✅ Secrets 齐全" >> "$GITHUB_STEP_SUMMARY"
-          [ -z "${SERVERCHAN_SENDKEY:-}" ] && echo "⚠️ 未配置 SERVERCHAN_SENDKEY，抢到后不会推微信" >> "$GITHUB_STEP_SUMMARY" || true
+          echo "✅ Secret'lar tam" >> "$GITHUB_STEP_SUMMARY"
+          [ -z "${SERVERCHAN_SENDKEY:-}" ] && echo "⚠️ SERVERCHAN_SENDKEY tanımlı değil, yakalansa bile WeChat push gitmeyecek" >> "$GITHUB_STEP_SUMMARY" || true
 
-      - name: 推送自检
+      - name: Push kanalı testi
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_notify == '1' }}
         run: |
           set -u
           ok=0
           if [ -n "${SERVERCHAN_SENDKEY:-}" ]; then
             curl -s -m 20 -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
-              --data-urlencode "title=✅ 甲骨文抢机 · Server酱通道已打通" \
-              --data-urlencode "desp=这是一条自检消息。" && ok=1
+              --data-urlencode "title=✅ OCI sniper · Server酱 kanalı çalışıyor" \
+              --data-urlencode "desp=Bu bir kanal test mesajıdır." && ok=1
           fi
           if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
             curl -s -m 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-              --data-urlencode "text=✅ 甲骨文抢机 · Telegram 通道已打通" && ok=1
+              --data-urlencode "text=✅ OCI sniper · Telegram kanalı çalışıyor" && ok=1
           fi
           if [ -n "${WECOM_WEBHOOK:-}" ]; then
-            jq -n '{msgtype:"text",text:{content:"✅ 甲骨文抢机 · 企业微信通道已打通"}}' \
+            jq -n '{msgtype:"text",text:{content:"✅ OCI sniper · WeCom kanalı çalışıyor"}}' \
               | curl -s -m 20 -X POST "$WECOM_WEBHOOK" -H 'Content-Type: application/json' -d @- && ok=1
           fi
           if [ -n "${WXPUSHER_SPT:-}" ]; then
             curl -s -m 20 -X POST "https://wxpusher.zjiecode.com/api/send/message/simple-push" \
               -H 'Content-Type: application/json' \
-              -d "$(jq -nc --arg s "$WXPUSHER_SPT" '{spt:$s,summary:"甲骨文抢机自检",content:"✅ 甲骨文抢机 · WxPusher 通道已打通",contentType:1}')" && ok=1
+              -d "$(jq -nc --arg s "$WXPUSHER_SPT" '{spt:$s,summary:"OCI sniper kanal testi",content:"✅ OCI sniper · WxPusher kanalı çalışıyor",contentType:1}')" && ok=1
           fi
           if [ "$ok" -eq 0 ]; then
-            echo "::error::四条推送通道都没配，请至少配一个（推荐 WECOM_WEBHOOK 或 WXPUSHER_SPT，免费不限量）"
+            echo "::error::Hiçbir push kanalı tanımlı değil, en az birini kur (önerilen: WECOM_WEBHOOK veya WXPUSHER_SPT — ücretsiz ve sınırsız)"
             exit 1
           fi
-          echo "自检消息已发送，请查看手机。" >> "$GITHUB_STEP_SUMMARY"
+          echo "Test mesajı gönderildi, telefonunu kontrol et." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 安装 OCI CLI
+      - name: OCI CLI kurulumu
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notify == '1') }}
         run: |
           curl -sL -o install.sh https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh
@@ -113,7 +115,7 @@ jobs:
           echo "$HOME/bin" >> "$GITHUB_PATH"
           sudo apt-get update -qq && sudo apt-get install -y -qq jq >/dev/null
 
-      - name: 写入 OCI 配置并鉴权
+      - name: OCI config yaz ve kimlik doğrula
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notify == '1') }}
         run: |
           export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
@@ -129,21 +131,21 @@ jobs:
           printf '%s\n' "${OCI_PRIVATE_KEY}" > ~/.oci/key.pem
           chmod 700 ~/.oci
           chmod 600 ~/.oci/key.pem ~/.oci/config
-          ~/bin/oci iam region list --query 'data[0].name' --raw-output && echo "✅ OCI 鉴权通过"
+          ~/bin/oci iam region list --query 'data[0].name' --raw-output && echo "✅ OCI kimlik doğrulama başarılı"
 
-      - name: 取回 cloud-init（实例出生即完成态）
+      - name: cloud-init indir (makine doğuştan tamamlanmış)
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notify == '1') }}
         run: |
           mkdir -p ~/.ssh
           curl -sL -o ~/.ssh/cloud-init.yaml \
             https://raw.githubusercontent.com/chengchengbeigu-source/ocisniper/main/.github/cloud-init.yaml
           head -1 ~/.ssh/cloud-init.yaml | grep -q '^#cloud-config' \
-            || { echo "::error::cloud-init 下载失败"; exit 1; }
+            || { echo "::error::cloud-init indirilemedi"; exit 1; }
           printf '%s\n' "${SSH_PUB_KEY}" > ~/.ssh/oracle_arm.pub
           chmod 600 ~/.ssh/oracle_arm.pub ~/.ssh/cloud-init.yaml
-          echo "cloud-init 已就绪，$(wc -l < ~/.ssh/cloud-init.yaml) 行"
+          echo "cloud-init hazır, $(wc -l < ~/.ssh/cloud-init.yaml) satır"
 
-      - name: 抢机主循环
+      - name: Ana yakalama döngüsü
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notify == '1') }}
         env:
           SHAPE_CONFIG: ${{ inputs.shape_config || '{"ocpus":2,"memoryInGBs":12}' }}
@@ -156,26 +158,26 @@ jobs:
 
           notify() {
             local title="$1" body="$2"
-            # 通道 1：Server酱 → 个人微信（免费版 5 条/天）
+            # Kanal 1: Server酱 → kişisel WeChat (ücretsiz plan: 5/gün)
             if [ -n "${SERVERCHAN_SENDKEY:-}" ]; then
               curl -s -m 20 -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
                 --data-urlencode "title=$title" --data-urlencode "desp=$body" >/dev/null || true
             fi
-            # 通道 2：Telegram Bot（免费无限量）
+            # Kanal 2: Telegram Bot (ücretsiz, sınırsız)
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               TG_TEXT=$(printf '%s\n%s' "$title" "$body")
               curl -s -m 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
                 --data-urlencode "text=${TG_TEXT}" >/dev/null || true
             fi
-            # 通道 3：企业微信群机器人（免费无限量）
+            # Kanal 3: WeCom grup botu (ücretsiz, sınırsız)
             if [ -n "${WECOM_WEBHOOK:-}" ]; then
               jq -n --arg t "$title" --arg b "$body" \
                 '{msgtype:"text",text:{content:($t+"\n"+$b)}}' \
                 | curl -s -m 20 -X POST "$WECOM_WEBHOOK" \
                     -H 'Content-Type: application/json' -d @- >/dev/null || true
             fi
-            # 通道 4：WxPusher 极简推送 SPT（免费无限，微信 ClawBot 直达）
+            # Kanal 4: WxPusher SPT (ücretsiz, sınırsız, WeChat ClawBot ile direkt)
             if [ -n "${WXPUSHER_SPT:-}" ]; then
               curl -s -m 20 -X POST "https://wxpusher.zjiecode.com/api/send/message/simple-push" \
                 -H 'Content-Type: application/json' \
@@ -186,26 +188,39 @@ jobs:
 
           AD_LIST=$(oci iam availability-domain list --compartment-id "$OCI_TENANCY" \
             --query 'data[*].name' --raw-output | jq -r '.[]' | sort)
-          echo "[AD] 目标可用区: $(echo $AD_LIST | tr '\n' ' ')"
-          echo "**可用区**：$(echo $AD_LIST | tr '\n' ' ')" >> "$GITHUB_STEP_SUMMARY"
+          echo "[AD] hedef availability-domain: $(echo $AD_LIST | tr '\n' ' ')"
+          echo "**Availability-domain**: $(echo $AD_LIST | tr '\n' ' ')" >> "$GITHUB_STEP_SUMMARY"
 
           IMAGE_ID=$(oci compute image list --compartment-id "$OCI_TENANCY" \
             --operating-system "Canonical Ubuntu" --operating-system-version "24.04" \
             --shape "VM.Standard.A1.Flex" --sort-by TIMECREATED --sort-order DESC \
             --query 'data[0].id' --raw-output)
           if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ]; then
-            echo "::error::拿不到 Ubuntu 24.04 ARM 镜像 ID"
-            notify "❌ 甲骨文抢机：镜像查询失败" "拿不到 VM.Standard.A1.Flex 的 Ubuntu 24.04 镜像，请检查 REGION 是否正确。"
+            echo "::error::Ubuntu 24.04 ARM görsel ID alınamadı"
+            notify "❌ OCI sniper: görsel sorgusu başarısız" "VM.Standard.A1.Flex için Ubuntu 24.04 görseli bulunamadı, REGION değerini kontrol et."
             exit 1
           fi
           echo "[IMG] $IMAGE_ID"
 
-          CANDIDATES="$SHAPE_CONFIG"
-          case "$SHAPE_CONFIG" in
-            *'"ocpus":4'*) CANDIDATES="$SHAPE_CONFIG '{"ocpus":2,"memoryInGBs":12}' '{"ocpus":1,"memoryInGBs":6}'" ;;
-            *'"ocpus":2'*) CANDIDATES="$SHAPE_CONFIG '{"ocpus":1,"memoryInGBs":6}'" ;;
-          esac
-          echo "[CFG] 尝试顺序: $CANDIDATES"
+          # ── Spec adayları: önce girdiyi doğrula, sonra OCPU sayısına göre kademeli düşür ──
+          #    Eski yol JSON'u boşlukla ayrılmış bir string'e katıyordu + case ile "ocpus":4
+          #    eşleştiriyordu; shape_config içine bir boşluk yazmak ikisini de kırıyordu.
+          if ! echo "$SHAPE_CONFIG" | jq -e . >/dev/null 2>&1; then
+            echo "::error::shape_config geçerli bir JSON değil: $SHAPE_CONFIG"
+            notify "❌ OCI sniper: geçersiz spec" "\`shape_config\` geçerli bir JSON değil: \`$SHAPE_CONFIG\`"
+            exit 1
+          fi
+          if ! WANTED_OCPUS=$(echo "$SHAPE_CONFIG" | jq -er '.ocpus | numbers' 2>/dev/null); then
+            echo "::error::shape_config içinde sayısal .ocpus alanı yok: $SHAPE_CONFIG"
+            notify "❌ OCI sniper: geçersiz spec" "\`shape_config\` içinde sayısal \`.ocpus\` alanı yok: \`$SHAPE_CONFIG\`"
+            exit 1
+          fi
+
+          # Always Free toplam 4 OCPU / 24 GB, 1C:6G oranında kademeli olarak en küçüğe iner
+          mapfile -t CFGS < <(jq -nc \
+            --argjson want "$WANTED_OCPUS" --argjson want_cfg "$SHAPE_CONFIG" \
+            '([$want_cfg] + ([{"ocpus":4,"memoryInGBs":24},{"ocpus":3,"memoryInGBs":18},{"ocpus":2,"memoryInGBs":12},{"ocpus":1,"memoryInGBs":6}] | map(select(.ocpus < $want)))) | .[]')
+          echo "[CFG] deneme sırası: ${CFGS[*]}"
 
           START=$(date +%s)
           LIMIT=$(( DURATION_MIN * 60 ))
@@ -214,12 +229,12 @@ jobs:
           while true; do
             NOW=$(date +%s); ELAPSED=$(( NOW - START ))
             if [ "$ELAPSED" -gt "$LIMIT" ]; then
-              echo "[TIMEOUT] 已跑满 ${DURATION_MIN} 分钟，安全退出。"
-              echo "⏱ 本轮未抢到，已安全退出（已跑 ${ELAPSED}s）。" >> "$GITHUB_STEP_SUMMARY"
+              echo "[TIMEOUT] ${DURATION_MIN} dakika doldu, güvenli çıkış."
+              echo "⏱ Bu turda yakalanmadı, güvenli çıkış yapıldı (${ELAPSED}s sürdü)." >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             ROUND=$(( ROUND + 1 ))
-            for cfg in $CANDIDATES; do
+            for cfg in "${CFGS[@]}"; do
               for ad in $AD_LIST; do
                 echo "[R${ROUND}][TRY] $ad | $cfg | ${ELAPSED}s"
                 OUT=$(oci compute instance launch \
@@ -233,46 +248,52 @@ jobs:
                   --user-data-file ~/.ssh/cloud-init.yaml \
                   --assign-public-ip true \
                   --boot-volume-size-in-gbs "$BOOT_GB" \
-                  --display-name "SNIPER-$(date +%m%d_%H%M)" \
-                  --wait-for-state RUNNING --max-wait-seconds 1 2>&1) && RC=0 || RC=$?
+                  --display-name "SNIPER-$(date +%m%d_%H%M)" 2>&1) && RC=0 || RC=$?
                 if [ "$RC" -eq 0 ]; then
                   IID=$(echo "$OUT" | jq -r '.data.id')
-                  IP=$(oci compute instance list-vnics --instance-id "$IID" \
-                        --query 'data[0]."public-ip"' --raw-output 2>/dev/null)
+                  # Makine oluşturuldu ama VNIC / public IP asenkron bağlanıyor, görünmesini bekle
+                  IP=""
+                  for _ in $(seq 1 30); do
+                    IP=$(oci compute instance list-vnics --instance-id "$IID" \
+                          --query 'data[0]."public-ip"' --raw-output 2>/dev/null)
+                    if [ -n "$IP" ] && [ "$IP" != "null" ]; then break; fi
+                    IP=""
+                    sleep 2
+                  done
                   echo "=============================================="
-                  echo "[SUCCESS] 抢到了！"
-                  echo "实例 OCID : $IID"
-                  echo "公网 IP   : $IP"
-                  echo "可用区    : $ad"
-                  echo "规格      : $cfg"
+                  echo "[SUCCESS] Yakalandı!"
+                  echo "Makine OCID : $IID"
+                  echo "Public IP   : $IP"
+                  echo "Domain      : $ad"
+                  echo "Spec        : $cfg"
                   echo "=============================================="
                   {
-                    echo "## 🎉 抢到甲骨文 ARM 实例"
+                    echo "## 🎉 OCI ARM makinesi yakalandı"
                     echo ""
-                    echo "| 项 | 值 |"
+                    echo "| Alan | Değer |"
                     echo "|---|---|"
-                    echo "| 实例 OCID | \`$IID\` |"
-                    echo "| 公网 IP | \`$IP\` |"
-                    echo "| 可用区 | \`$ad\` |"
-                    echo "| 规格 | \`$cfg\` |"
-                    echo "| 引导卷 | ${BOOT_GB} GB |"
-                    echo "| 登录用户 | \`ubuntu\` |"
-                    echo "| 保活 | cloud-init 已自动装上并启动 |"
+                    echo "| Makine OCID | \`$IID\` |"
+                    echo "| Public IP | \`$IP\` |"
+                    echo "| Availability-domain | \`$ad\` |"
+                    echo "| Spec | \`$cfg\` |"
+                    echo "| Boot volume | ${BOOT_GB} GB |"
+                    echo "| Kullanıcı | \`ubuntu\` |"
+                    echo "| Keepalive | cloud-init ile otomatik kuruldu ve başlatıldı |"
                     echo ""
-                    echo "SSH：\`ssh -i <你的私钥> ubuntu@$IP\`"
+                    echo "SSH: \`ssh -i <özel-anahtarın> ubuntu@$IP\`"
                   } >> "$GITHUB_STEP_SUMMARY"
-                  notify "🎉 甲骨文 ARM 抢机成功！" "**实例 OCID**：\`$IID\`  \n\n**公网 IP**：\`$IP\`  \n\n**可用区**：\`$ad\`  \n\n**规格**：\`$cfg\`  \n\n**引导卷**：${BOOT_GB} GB  \n\n保活与网络心跳已由 cloud-init 自动装好，登录即可用。  \n\n登录：\`ssh -i <私钥> ubuntu@$IP\`"
+                  notify "🎉 OCI ARM makinesi yakalandı!" "**Makine OCID**:\`$IID\`  \n\n**Public IP**:\`$IP\`  \n\n**Availability-domain**:\`$ad\`  \n\n**Spec**:\`$cfg\`  \n\n**Boot volume**: ${BOOT_GB} GB  \n\nKeepalive ve ağ heartbeat'i cloud-init ile kuruldu, giriş yapınca hazır.  \n\nSSH: \`ssh -i <özel-anahtarın> ubuntu@$IP\`"
                   echo "$IID" > instance-ocid.txt
                   exit 0
                 fi
                 if echo "$OUT" | grep -qiE 'quota|LimitExceeded|not eligible|CannotParseRequest'; then
-                  echo "  ↳ 配额不足/不可用，跳过该配置：$cfg"
+                  echo "  ↳ Kota yetersiz veya uygun değil, bu spec atlanıyor: $cfg"
                   continue 2
                 fi
                 if echo "$OUT" | grep -qiE 'Out of host capacity|OutOfHostCapacity|capacity'; then
-                  echo "  ↳ $ad 无库存"
+                  echo "  ↳ $ad stokta yok"
                 else
-                  echo "  ↳ 其他错误：$(echo "$OUT" | tail -3 | tr '\n' ' ' | cut -c1-240)"
+                  echo "  ↳ Diğer hata: $(echo "$OUT" | tail -3 | tr '\n' ' ' | cut -c1-240)"
                 fi
                 sleep 3
               done
@@ -280,7 +301,7 @@ jobs:
             sleep 30
           done
 
-      - name: 保存实例信息
+      - name: Makine bilgisini kaydet
         if: ${{ hashFiles('instance-ocid.txt') != '' }}
         uses: actions/upload-artifact@v4
         with:

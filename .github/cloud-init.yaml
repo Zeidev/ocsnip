@@ -1,11 +1,11 @@
 #cloud-config
 # ─────────────────────────────────────────────────────────────
-# ocisniper 实例初始化脚本（实例出生即完成态）
-# 目的：规避甲骨文官方「7 天闲置回收」规则，并把环境一次装好
-#   CPU 95 分位 ≥ 20%  → oci-keepalive（stress-ng 常驻 65% 负载）
-#   内存 95 分位 ≥ 20% → oci-keepalive 同时吃 40% 内存
-#   网络 95 分位 ≥ 20% → oci-netbeat（每小时 25MB 下载）
-# 任意一项不达标就不构成「闲置」，实例不会被回收。
+# ocisniper makine başlangıç betiği (makine doğuştan tamamlanmış gelir)
+# Amaç: resmî "7 gün boşta kalınca geri alınır" kuralını aşmak, ortamı tek seferde kurmak
+#   CPU 95. persentil  ≥ %20 → oci-keepalive (stress-ng sürekli %65 yük)
+#   RAM 95. persentil ≥ %20 → oci-keepalive aynı anda %40 bellek tutuyor
+#   Ağ  95. persentil ≥ %20 → oci-netbeat (saatte 25 MB indirme)
+# Bunlardan biri düşük kalırsa makine "boşta" sayılır ve geri alınır.
 # ─────────────────────────────────────────────────────────────
 package_update: true
 package_upgrade: false
@@ -26,7 +26,7 @@ write_files:
     permissions: '0755'
     content: |
       #!/bin/bash
-      # CPU + 内存双指标常驻负载，防止官方闲置回收
+      # CPU + bellek çift metrikli sürekli yük, resmî geri-alma kuralına karşı
       exec stress-ng --cpu 1 --cpu-load 65 --vm 1 --vm-bytes 40% --vm-keep --timeout 0
 
   - path: /etc/systemd/system/oci-keepalive.service
@@ -51,7 +51,7 @@ write_files:
     permissions: '0755'
     content: |
       #!/bin/bash
-      # 每小时拉 25MB，把网络 95 分位顶起来（网络指标双保险）
+      # Saatte 25 MB indirir, ağ 95. persentilini yukarı kaldırır (ağ için çift güvence)
       while true; do
         curl -s -m 120 -o /dev/null https://speed.cloudflare.com/__down?bytes=25000000 || true
         sleep 3600
@@ -77,16 +77,16 @@ write_files:
     permissions: '0644'
     content: |
       ==================================================
-        这台机器由 ocisniper 自动抢下并完成初始化
-          · 保活服务：systemctl status oci-keepalive
-          · 网络心跳：systemctl status oci-netbeat
-          · 别停上面两个服务，否则 7 天内会被甲骨文回收
+        Bu makine ocisniper tarafından otomatik yakalandı ve kuruldu
+          · keepalive servisi:  systemctl status oci-keepalive
+          · ağ heartbeat servisi: systemctl status oci-netbeat
+          · Yukarıdaki iki servisi durdurma, yoksa 7 gün içinde geri alınır
       ==================================================
 
 runcmd:
   - systemctl daemon-reload
   - systemctl enable --now oci-keepalive.service
   - systemctl enable --now oci-netbeat.service
-  - echo "ocisniper cloud-init done at $(date -Is)" > /var/log/ocisniper-init.log
+  - echo "ocisniper cloud-init tamamlandi: $(date -Is)" > /var/log/ocisniper-init.log
 
-final_message: "ocisniper: 实例初始化完成（保活已启动）"
+final_message: "ocisniper: makine kurulumu tamamlandı (keepalive başlatıldı)"

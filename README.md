@@ -1,43 +1,43 @@
 # Oracle ARM Sniper
 
-甲骨文云 (Oracle Cloud) Always Free ARM 实例 (`VM.Standard.A1.Flex`) 自动抢机工作流。
+Oracle Cloud (Oracle Bulut) Always Free ARM makinesi (`VM.Standard.A1.Flex`) otomatik yakalama iş akışı.
 
-## 为什么放公开仓库
+## Neden herkese açık repo?
 
-GitHub Actions 对**公开仓库**完全免费、不计分钟数，可以 7×24 不间断跑。
-私有仓库每月只有 2000 分钟，跑不到 3 天就烧完了。
+GitHub Actions, **herkese açık** depolarda dakika saymaz, ücretsizdir ve 7×24 kesintisiz çalışabilir.
+Özel depolarda aylık yalnızca 2000 dakika hakkın var, 3 güne bile dayanamaz.
 
-## 工作方式
+## Nasıl çalışır?
 
-- 每 5 小时触发一轮（`cron: 0 */5 * * *`），单轮最长跑 290 分钟
-- 上一轮没结束时新的一轮会排队，不会互相踩
-- 覆盖所有可用区 (AD)，配置按 `2C/12G → 1C/6G` 依次降级尝试
-- 抢到后：写 Step Summary + 微信推送 (Server酱) + 上传 `instance-ocid.txt` 产物
+- Her 5 saatte bir tur tetiklenir (`cron: 0 */5 * * *`), tek tur en fazla 290 dakika sürer
+- Önceki tur bitmeden yeni tur kuyruğa alınır, birbirine karışmaz
+- Tüm availability-domain'leri dener, spec `2C/12G → 1C/6G` sırasıyla küçülür
+- Yakaladığında: Step Summary + WeChat push (Server酱) + `instance-ocid.txt` artefaktı
 
-## 需要的 Secrets
+## Gerekli Secret'lar
 
-在仓库 `Settings → Secrets and variables → Actions` 里添加：
+Depoda `Settings → Secrets and variables → Actions` bölümüne ekle:
 
-| Secret | 说明 |
+| Secret | Açıklama |
 |---|---|
-| `TENANCY_OCID` | 租户 OCID |
-| `USER_OCID` | 用户 OCID |
-| `FINGERPRINT` | API 密钥指纹 |
-| `REGION` | 区域标识，如 `ap-tokyo-1` |
-| `PRIVATE_KEY` | API 私钥全文（含 BEGIN/END 行） |
-| `SUBNET_ID` | 子网 OCID |
-| `SSH_PUB_KEY` | 公钥全文（`ssh-ed25519 AAAA... user@host`） |
-| `SERVERCHAN_SENDKEY` | Server酱 SendKey（可选，用于微信推送） |
+| `TENANCY_OCID` | Tenancy OCID |
+| `USER_OCID` | Kullanıcı OCID |
+| `FINGERPRINT` | API anahtarı parmak izi |
+| `REGION` | Bölge kimliği, ör. `ap-tokyo-1` |
+| `PRIVATE_KEY` | API özel anahtarının tamamı (BEGIN/END satırları dahil) |
+| `SUBNET_ID` | Subnet OCID |
+| `SSH_PUB_KEY` | Genel anahtarın tamamı (`ssh-ed25519 AAAA... user@host`) |
+| `SERVERCHAN_SENDKEY` | Server酱 SendKey (opsiyonel, WeChat push için) |
 
-## 手动触发
+## Elle tetikleme
 
 Actions → Oracle ARM Sniper → Run workflow
 
-- `test_notify=1`：只测微信推送，不抢机
-- `shape_config`：目标规格 JSON，默认 `{"ocpus":2,"memoryInGBs":12}`
-- `boot_volume_gb`：引导卷大小，默认 100
-- `duration_min`：单轮运行上限分钟数，默认 290
+- `test_notify=1`: sadece WeChat push'u test eder, makine yakalamaz
+- `shape_config`: hedef spec JSON, varsayılan `{"ocpus":2,"memoryInGBs":12}`
+- `boot_volume_gb`: boot volume boyutu, varsayılan 100
+- `duration_min`: tek tur süre sınırı, varsayılan 290
 
-## 免责
+## Sorumluluk reddi
 
-高频轮询抢机可能与甲骨文云的服务条款存在冲突，风险自负。
+Yüksek frekanslı denemek Oracle Cloud hizmet şartlarıyla çelişebilir, sorumluluk kullanıcıya aittir.
